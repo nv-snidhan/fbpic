@@ -28,11 +28,14 @@ the GPU. In order, to limit the amount of data to be transfered, particles are
 handled in batches of 10 particles, so that only the cumulative sum of the
 number of particles in each batch need to be performed.
 """
+from operator import index
+
 import numpy as np
 from scipy.constants import c, e, m_e, physical_constants
 from scipy.special import gamma
 from .read_atomic_data import get_ionization_energies
 from .numba_methods import ionize_ions_numba, copy_ionized_electrons_numba
+from .random import generate_ionization_draws_cpu
 from ..cuda_numba_utils import allocate_empty, reallocate_and_copy_old, \
                                 perform_cumsum_2d, generate_new_ids
 from ...spin.numba_methods import copy_ionized_electron_spin_numba
@@ -44,6 +47,7 @@ if cuda_installed:
     import cupy
     from fbpic.utils.cuda import cuda_tpb_bpg_1d
     from .cuda_methods import ionize_ions_cuda, copy_ionized_electrons_cuda
+    from .random import generate_ionization_draws_gpu
     from ...spin.cuda_methods import copy_ionized_electron_spin_cuda
     from ...spin.cuda_numba_utils import random_point_sphere_gpu
 
@@ -72,7 +76,7 @@ class Ionizer(object):
       kernel as the effective weight of the particles)
     """
     def __init__(self, element, ionizable_species, target_species,
-                 level_start, level_max=None):
+                 level_start, level_max=None, rng_seed=None, rng_stream=None):
         """
         Initialize an Ionizer instance
 
@@ -111,7 +115,33 @@ class Ionizer(object):
             If not None, defines the maximum ionization level that
             macroparticles can reach. Should not exceed the physical
             limit for the chosen element.
+
+        rng_seed, rng_stream: int, optional
+            Select ID-based float32 draws as documented in make_ionizable.
         """
+        # Keep the legacy draw sequence unless an explicit seed is supplied.
+        self.rng_seed = None
+        self.rng_stream = None
+        if rng_seed is None:
+            if rng_stream is not None:
+                raise ValueError("rng_stream requires rng_seed.")
+        else:
+            seed = index(rng_seed)
+            if not 0 <= seed < 2**64:
+                raise ValueError("rng_seed must be an unsigned 64-bit integer.")
+            if rng_stream is None:
+                raise ValueError("ID-based ionization requires rng_stream.")
+            stream = index(rng_stream)
+            if not 0 <= stream < 2**24:
+                raise ValueError("rng_stream must be an unsigned 24-bit integer.")
+            if ionizable_species.tracker is None:
+                raise ValueError(
+                    "Call species.track(sim.comm) before make_ionizable "
+                    "to enable ID-based ionization."
+                )
+            self.rng_seed = np.uint64(seed)
+            self.rng_stream = np.uint32(stream)
+
         # Register a few parameters
         self.level_start = level_start
         self.level_max = level_max
@@ -220,8 +250,31 @@ class Ionizer(object):
             * ( 2*(Uion/UH)**(3./2)*Ea )**(2*n_eff - 1)
         self.adk_exp_prefactor = -2./3 * ( Uion/UH )**(3./2) * Ea
 
+    def _draw_random_numbers(self, ion, iteration):
+        if self.rng_seed is None:
+            if self.use_cuda:
+                return cupy.random.rand(ion.Ntot, dtype=cupy.float32)
+            return np.random.rand(ion.Ntot)
+
+        if iteration is None:
+            raise ValueError("ID-based ionization requires the simulation iteration.")
+        iteration = index(iteration)
+        if not 0 <= iteration < 2**32:
+            raise ValueError("Ionization iteration must be an unsigned 32-bit integer.")
+        draws = allocate_empty(ion.Ntot, self.use_cuda, dtype=np.float32)
+        args = (
+            ion.tracker.id, self.ionization_level, np.uint32(iteration),
+            self.rng_seed, self.rng_stream, draws,
+        )
+        if self.use_cuda:
+            grid, block = cuda_tpb_bpg_1d(ion.Ntot)
+            generate_ionization_draws_gpu[grid, block](*args)
+        else:
+            generate_ionization_draws_cpu(*args)
+        return draws
+
     @catch_gpu_memory_error
-    def handle_ionization( self, ion ):
+    def handle_ionization( self, ion, iteration=None ):
         """
         Handle ionization, either on CPU or GPU
 
@@ -233,6 +286,9 @@ class Ionizer(object):
         -----------
         ion: an fbpic.Particles object
             The ionizable species, from which new electrons are created.
+
+        iteration: int, optional
+            Global simulation iteration, required for ID-based draws.
         """
         # Skip this function if there are no ions
         if ion.Ntot == 0:
@@ -253,11 +309,8 @@ class Ionizer(object):
         ionized_from = allocate_empty( ion.Ntot, use_cuda, dtype=np.int16 )
         n_ionized = allocate_empty( (n_levels, N_batch), use_cuda,
                                     dtype=np.int64 )
-        # Draw random numbers
-        if self.use_cuda:
-            random_draw = cupy.random.rand( ion.Ntot, dtype=cupy.float32 )
-        else:
-            random_draw = np.random.rand( ion.Ntot )
+        # Associate each draw with an ion ID when the reproducible path is active.
+        random_draw = self._draw_random_numbers(ion, iteration)
 
         # Determine the ions that are ionized, and count them in each batch
         # (one thread per batch on GPU; parallel loop over batches on CPU)

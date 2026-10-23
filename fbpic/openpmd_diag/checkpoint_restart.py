@@ -336,6 +336,8 @@ def load_species( species, name, ts, iteration, comm, openpmd_viewer_version ):
         pid, = ts.get_particle( ['id'], iteration=iteration, species=name )
         species.track( comm )
         species.tracker.overwrite_ids( pid, comm )
+    elif species.ionizer is not None and species.ionizer.rng_seed is not None:
+        raise ValueError("ID-based ionization requires particle IDs in the checkpoint.")
 
     # If the species is ionizable, set the proper arrays
     if species.ionizer is not None:

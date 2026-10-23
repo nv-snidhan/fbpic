@@ -402,9 +402,10 @@ class Particles(object) :
         comm: an fbpic.BoundaryCommunicator object
             Contains information about the number of processors
         """
+        # Restart can replace existing IDs without adding another buffer field.
+        if self.tracker is None:
+            self.n_integer_quantities += 1
         self.tracker = ParticleTracker( comm.size, comm.rank, self.Ntot )
-        # Update the number of integer quantities
-        self.n_integer_quantities += 1
         # Allocate the integer sorting buffer if needed
         if hasattr( self, 'int_sorting_buffer' ) is False and self.use_cuda:
             self.int_sorting_buffer = np.empty( self.Ntot, dtype=np.uint64 )
@@ -499,7 +500,7 @@ class Particles(object) :
         )
 
     def make_ionizable(self, element, target_species,
-                       level_start=0, level_max=None):
+                       level_start=0, level_max=None, rng_seed=None, rng_stream=None):
         """
         Make this species ionizable.
 
@@ -540,10 +541,24 @@ class Particles(object) :
             If not None, defines the maximum ionization level that
             macroparticles can reach. Should not exceed the physical
             limit for the chosen element.
+
+        rng_seed: int, optional
+            Enable ID-based Philox draws with an unsigned 64-bit seed.
+            First call `track(sim.comm)` on this species.
+            Draws use float32 values in [0, 1).
+            None retains the existing random sequence.
+
+        rng_stream: int, optional
+            Required with rng_seed; use a distinct unsigned 24-bit value
+            for each ionizable species that shares the same seed.
+            Matching backends require matching IDs, seeds, streams, and steps.
+            Matching MPI decompositions and particle loading are also required.
+            When restarting, recreate the same seed and stream configuration.
         """
         # Initialize the ionizer module
         self.ionizer = Ionizer( element, self, target_species,
-                                level_start, level_max=level_max )
+                                level_start, level_max=level_max,
+                                rng_seed=rng_seed, rng_stream=rng_stream )
         # Set charge to the elementary charge e (assumed by deposition kernel,
         # when using self.ionizer.w_times_level as the effective weight)
         self.q = e
@@ -632,14 +647,16 @@ class Particles(object) :
         # Update the number of float and int arrays
         self.n_float_quantities += 3  # sx, sy, sz
 
-    def handle_elementary_processes( self, t ):
+    def handle_elementary_processes( self, t, iteration=None ):
         """
         Handle elementary processes for this species (e.g. ionization,
         Compton scattering) at simulation time t.
+
+        Pass the global simulation iteration when ID-based ionization is active.
         """
         # Ionization
         if self.ionizer is not None:
-            self.ionizer.handle_ionization( self )
+            self.ionizer.handle_ionization( self, iteration=iteration )
         # Synchrotron radiation
         if self.synchrotron_radiator is not None:
             self.synchrotron_radiator.handle_radiation()

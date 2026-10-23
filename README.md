@@ -113,6 +113,32 @@ The code outputs HDF5 files, that comply with the
  and which can thus be read as such (e.g. by using the
  [openPMD-viewer](https://github.com/openPMD/openPMD-viewer)).
 
+## Reproducible ionization draws
+
+Enable particle tracking before selecting ID-based ionization draws:
+
+```python
+ions.track(sim.comm)
+ions.make_ionizable(
+    "He", target_species=electrons, level_start=1,
+    rng_seed=0, rng_stream=0,
+)
+```
+
+Use the same unsigned 64-bit seed in both backends.
+Assign a distinct unsigned 24-bit stream to each ionizable species that shares that seed.
+The generator uses [Philox4x32-10](https://github.com/DEShawResearch/random123/blob/main/include/Random123/philox.h).
+Each draw depends on the persistent ion ID, global iteration, stream, and ionization level.
+The output remains float32 in [0, 1), and the ADK calculation stays unchanged.
+Without `rng_seed`, the existing draw sequence remains active.
+
+Matching runs require matching particle loading, IDs, MPI decompositions, seeds, and streams.
+Particle sorting does not change the draw assigned to an ion.
+The global iteration must be below `2**32`.
+When restarting, use a checkpoint with particle IDs and recreate the same seed and stream configuration.
+The sampled realization changes; statistical physics agreement requires validation across realizations.
+Small probability differences can still produce different decisions with a shared draw.
+
 ## Contributing
 
 We welcome contributions to the code! Please read [this page](https://github.com/fbpic/fbpic/blob/dev/CONTRIBUTING.md) for guidelines on how to contribute.

@@ -513,7 +513,8 @@ class Simulation(object):
             # i.e. when the particles' velocity and position are synchronized
             # (e.g. ionization, Compton scattering, ...)
             for species in ptcl:
-                species.handle_elementary_processes( self.time + 0.5*dt )
+                species.handle_elementary_processes(
+                    self.time + 0.5*dt, iteration=self.iteration )
 
             # Fields are not used beyond this point ; no need to keep sorted
             for species in ptcl:

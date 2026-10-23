@@ -128,8 +128,8 @@ class ParticleTracker(object):
             global_id_max = max( local_id_max_list )
         # Find the next_attibuted_id: has to be of the form
         # comm.rank + n*self.id_step
-        n = int( (global_id_max - comm.rank)/self.id_step ) + 1
-        self.next_attibuted_id = comm.rank + n*self.id_step
+        n = (int(global_id_max) - comm.rank) // self.id_step + 1
+        self.next_attributed_id = comm.rank + n*self.id_step
 
 if cuda_installed:
 
